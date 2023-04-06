@@ -1,13 +1,17 @@
-package com.r3.developers.csdetemplate.utxoexample.workflows;
+package com.r3.developers.csdetemplate.tokens.workflows;
 
-import com.r3.developers.csdetemplate.utxoexample.contracts.ChatContract;
-import com.r3.developers.csdetemplate.utxoexample.states.ChatState;
-import net.corda.v5.application.flows.*;
+import com.r3.developers.csdetemplate.utxoexample.contracts.GoldContract;
+import com.r3.developers.csdetemplate.utxoexample.states.GoldState;
+import net.corda.v5.application.flows.ClientRequestBody;
+import net.corda.v5.application.flows.ClientStartableFlow;
+import net.corda.v5.application.flows.CordaInject;
+import net.corda.v5.application.flows.FlowEngine;
 import net.corda.v5.application.marshalling.JsonMarshallingService;
 import net.corda.v5.application.membership.MemberLookup;
 import net.corda.v5.base.annotations.Suspendable;
 import net.corda.v5.base.exceptions.CordaRuntimeException;
 import net.corda.v5.base.types.MemberX500Name;
+import net.corda.v5.crypto.SecureHash;
 import net.corda.v5.ledger.common.NotaryLookup;
 import net.corda.v5.ledger.common.Party;
 import net.corda.v5.ledger.utxo.UtxoLedgerService;
@@ -18,19 +22,22 @@ import net.corda.v5.membership.NotaryInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.math.BigDecimal;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.PublicKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Objects;
-import java.util.UUID;
 
-import static java.util.Objects.*;
+import static java.util.Objects.requireNonNull;
+import static net.corda.v5.crypto.DigestAlgorithmName.SHA2_256;
 
 // See Chat CorDapp Design section of the getting started docs for a description of this flow.
-public class CreateNewChatFlow implements ClientStartableFlow {
+public class MintGoldTokensFlow implements ClientStartableFlow {
 
-    private final static Logger log = LoggerFactory.getLogger(CreateNewChatFlow.class);
+    private final static Logger log = LoggerFactory.getLogger(MintGoldTokensFlow.class);
 
     @CordaInject
     public JsonMarshallingService jsonMarshallingService;
@@ -58,23 +65,18 @@ public class CreateNewChatFlow implements ClientStartableFlow {
 
         try {
             // Obtain the deserialized input arguments to the flow from the requestBody.
-            CreateNewChatFlowArgs flowArgs = requestBody.getRequestBodyAs(jsonMarshallingService, CreateNewChatFlowArgs.class);
+            MintGoldFlowInputArgs mintGoldInputRequest = requestBody.getRequestBodyAs(jsonMarshallingService, MintGoldFlowInputArgs.class);
 
-            // Get MemberInfos for the Vnode running the flow and the otherMember.
+            // Get MemberInfos for the Vnode running the flow and the issuerMember.
             MemberInfo myInfo = memberLookup.myInfo();
-            MemberInfo otherMember = requireNonNull(
-                    memberLookup.lookup(MemberX500Name.parse(flowArgs.getOtherMember())),
-                    "MemberLookup can't find otherMember specified in flow arguments."
+
+            MemberInfo issuerMember = requireNonNull(
+                    memberLookup.lookup(MemberX500Name.parse(mintGoldInputRequest.getIssuer())),
+                    "MemberLookup can't find issuerMember specified in flow arguments."
             );
 
-            // Create the ChatState from the input arguments and member information.
-            ChatState chatState = new ChatState(
-                    UUID.randomUUID(),
-                    flowArgs.getChatName(),
-                    myInfo.getName(),
-                    flowArgs.getMessage(),
-                    Arrays.asList(myInfo.getLedgerKeys().get(0), otherMember.getLedgerKeys().get(0))
-            );
+            GoldState goldState = new GoldState(getSecureHash(issuerMember.getName().getCommonName()), mintGoldInputRequest.getSymbol(), new BigDecimal(mintGoldInputRequest.getValue()),
+                    Arrays.asList(myInfo.getLedgerKeys().get(0), issuerMember.getLedgerKeys().get(0)), getSecureHash(myInfo.getName().getCommonName()));
 
             // Obtain the Notary name and public key.
             NotaryInfo notary = notaryLookup.getNotaryServices().iterator().next();
@@ -97,9 +99,9 @@ public class CreateNewChatFlow implements ClientStartableFlow {
             UtxoTransactionBuilder txBuilder = ledgerService.getTransactionBuilder()
                     .setNotary(new Party(notary.getName(), notaryKey))
                     .setTimeWindowBetween(Instant.now(), Instant.now().plusMillis(Duration.ofDays(1).toMillis()))
-                    .addOutputState(chatState)
-                    .addCommand(new ChatContract.Create())
-                    .addSignatories(chatState.getParticipants());
+                    .addOutputState(goldState)
+                    .addCommand(new GoldContract.Create())
+                    .addSignatories(goldState.getParticipants());
 
             // Convert the transaction builder to a UTXOSignedTransaction. Verifies the content of the
             // UtxoTransactionBuilder and signs the transaction with any required signatories that belong to
@@ -109,7 +111,7 @@ public class CreateNewChatFlow implements ClientStartableFlow {
             // Call FinalizeChatSubFlow which will finalise the transaction.
             // If successful the flow will return a String of the created transaction id,
             // if not successful it will return an error message.
-            return flowEngine.subFlow(new FinalizeChatSubFlow(signedTransaction, otherMember.getName()));
+            return flowEngine.subFlow(new FinalizeMintSubFlow(signedTransaction, issuerMember.getName()));
         }
         // Catch any exceptions, log them and rethrow the exception.
         catch (Exception e) {
@@ -117,17 +119,21 @@ public class CreateNewChatFlow implements ClientStartableFlow {
             throw new CordaRuntimeException(e.getMessage());
         }
     }
+
+    private SecureHash getSecureHash(String commonName) throws NoSuchAlgorithmException {
+        return new SecureHash(SHA2_256.getName(), MessageDigest.getInstance(SHA2_256.getName()).digest(commonName.getBytes()));
+    }
 }
 
 /*
 RequestBody for triggering the flow via REST:
 {
     "clientRequestId": "create-1",
-    "flowClassName": "com.r3.developers.csdetemplate.utxoexample.workflows.CreateNewChatFlow",
+    "flowClassName": "com.r3.developers.csdetemplate.tokens.workflows.MintGoldTokensFlow",
     "requestBody": {
-        "chatName":"Chat with Bob",
-        "otherMember":"CN=Bob, OU=Test Dept, O=R3, L=London, C=GB",
-        "message": "Hello Bob"
+        "symbol":"GOLD",
+        "issuer":"CN=Bob, OU=Test Dept, O=R3, L=London, C=GB",
+        "value":"20"
         }
 }
  */
