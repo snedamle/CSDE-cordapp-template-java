@@ -33,6 +33,7 @@ import java.security.PublicKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
@@ -65,6 +66,9 @@ public class TransferGoldTokenFlow implements ClientStartableFlow {
     @Override
     public String call( ClientRequestBody requestBody) {
         TokenClaim tokenClaim = null;
+        BigDecimal totalAmount = null;
+        BigDecimal change = null;
+
         try {
 
             TransferGoldFlowInputArgs flowArgs = requestBody.getRequestBodyAs(jsonMarshallingService, TransferGoldFlowInputArgs.class);
@@ -111,21 +115,42 @@ public class TransferGoldTokenFlow implements ClientStartableFlow {
                 return "No Tokens Found";
             }
 
-            log.info("Found total " + tokenClaim.getClaimedTokens().size() + " tokens found for " + jsonMarshallingService.format(tokenClaimCriteria));
+            List<ClaimedToken> claimedTokenList = tokenClaim.getClaimedTokens().stream().collect(Collectors.toList());
 
-            GoldState goldState = new GoldState(getSecureHash(issuerMember.getName().getCommonName()),
+            totalAmount = claimedTokenList.stream().map(ClaimedToken::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
+            change = totalAmount.subtract(new BigDecimal(flowArgs.getValue()));
+
+            log.info("Found total " + totalAmount + " amount of tokens for " + jsonMarshallingService.format(tokenClaimCriteria));
+
+            GoldState goldStateNew = new GoldState(getSecureHash(issuerMember.getName().getCommonName()),
                     flowArgs.getSymbol(), new BigDecimal(flowArgs.getValue()),
-                    Arrays.asList(myInfo.getLedgerKeys().get(0),
-                            newOwnerMember.getLedgerKeys().get(0)),
+                    Arrays.asList(newOwnerMember.getLedgerKeys().get(0)),
                     getSecureHash(newOwnerMember.getName().getCommonName()));
 
-            UtxoTransactionBuilder txBuilder = ledgerService.getTransactionBuilder()
-                    .setNotary(new Party(notary.getName(), notaryKey))
-                    .setTimeWindowBetween(Instant.now(), Instant.now().plusMillis(Duration.ofDays(1).toMillis()))
-                    .addInputStates(tokenClaim.getClaimedTokens().stream().map(ClaimedToken::getStateRef).collect(Collectors.toList()))
-                    .addOutputState(goldState)
-                    .addCommand(new GoldContract.Transfer())
-                    .addSignatories(goldState.getParticipants());
+            UtxoTransactionBuilder txBuilder = null;
+
+            if(change.compareTo(BigDecimal.ZERO) > 0) {
+                GoldState goldStateChange = new GoldState(getSecureHash(issuerMember.getName().getCommonName()),
+                        flowArgs.getSymbol(), change,
+                        Arrays.asList(myInfo.getLedgerKeys().get(0)),
+                        getSecureHash(newOwnerMember.getName().getCommonName()));
+
+                txBuilder = ledgerService.getTransactionBuilder()
+                        .setNotary(new Party(notary.getName(), notaryKey))
+                        .setTimeWindowBetween(Instant.now(), Instant.now().plusMillis(Duration.ofDays(1).toMillis()))
+                        .addInputStates(tokenClaim.getClaimedTokens().stream().map(ClaimedToken::getStateRef).collect(Collectors.toList()))
+                        .addOutputStates(Arrays.asList(goldStateChange, goldStateNew))
+                        .addCommand(new GoldContract.Transfer())
+                        .addSignatories(Arrays.asList(myInfo.getLedgerKeys().get(0), newOwnerMember.getLedgerKeys().get(0)));
+            } else {
+                txBuilder = ledgerService.getTransactionBuilder()
+                        .setNotary(new Party(notary.getName(), notaryKey))
+                        .setTimeWindowBetween(Instant.now(), Instant.now().plusMillis(Duration.ofDays(1).toMillis()))
+                        .addInputStates(tokenClaim.getClaimedTokens().stream().map(ClaimedToken::getStateRef).collect(Collectors.toList()))
+                        .addOutputStates(goldStateNew)
+                        .addCommand(new GoldContract.Transfer())
+                        .addSignatories(Arrays.asList(myInfo.getLedgerKeys().get(0), newOwnerMember.getLedgerKeys().get(0)));
+            }
 
             UtxoSignedTransaction signedTransaction = txBuilder.toSignedTransaction();
 
@@ -149,9 +174,10 @@ public class TransferGoldTokenFlow implements ClientStartableFlow {
 
                 tokenClaim.useAndRelease(tokenClaim.getClaimedTokens().stream().map(ClaimedToken::getStateRef).collect(Collectors.toList()));
 
-                return "Total Value of Tokens Released : " + tokenClaim.getClaimedTokens().size();
+                return "Total Available amount of Tokens : " + totalAmount + " change to be given back to the owner : " + change + " Total amount satisfied " + totalAmount.subtract(change);
+
             }
-            return null;
+            return "No Tokens Found";
         }
     }
 

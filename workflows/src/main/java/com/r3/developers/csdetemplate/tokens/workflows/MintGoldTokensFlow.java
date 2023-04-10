@@ -75,8 +75,10 @@ public class MintGoldTokensFlow implements ClientStartableFlow {
                     "MemberLookup can't find issuerMember specified in flow arguments."
             );
 
-            GoldState goldState = new GoldState(getSecureHash(issuerMember.getName().getCommonName()), mintGoldInputRequest.getSymbol(), new BigDecimal(mintGoldInputRequest.getValue()),
-                    Arrays.asList(myInfo.getLedgerKeys().get(0), issuerMember.getLedgerKeys().get(0)), getSecureHash(myInfo.getName().getCommonName()));
+            GoldState goldState = new GoldState(getSecureHash(issuerMember.getName().getCommonName()),
+                    mintGoldInputRequest.getSymbol(), new BigDecimal(mintGoldInputRequest.getValue()),
+                    Arrays.asList(myInfo.getLedgerKeys().get(0)),
+                    getSecureHash(myInfo.getName().getCommonName()));
 
             // Obtain the Notary name and public key.
             NotaryInfo notary = notaryLookup.getNotaryServices().iterator().next();
@@ -101,7 +103,7 @@ public class MintGoldTokensFlow implements ClientStartableFlow {
                     .setTimeWindowBetween(Instant.now(), Instant.now().plusMillis(Duration.ofDays(1).toMillis()))
                     .addOutputState(goldState)
                     .addCommand(new GoldContract.Create())
-                    .addSignatories(goldState.getParticipants());
+                    .addSignatories(myInfo.getLedgerKeys().get(0));
 
             // Convert the transaction builder to a UTXOSignedTransaction. Verifies the content of the
             // UtxoTransactionBuilder and signs the transaction with any required signatories that belong to
@@ -111,7 +113,13 @@ public class MintGoldTokensFlow implements ClientStartableFlow {
             // Call FinalizeChatSubFlow which will finalise the transaction.
             // If successful the flow will return a String of the created transaction id,
             // if not successful it will return an error message.
-            return flowEngine.subFlow(new FinalizeMintSubFlow(signedTransaction, issuerMember.getName()));
+            UtxoSignedTransaction finalizedSignedTransaction = ledgerService.finalize(
+                    signedTransaction,
+                    Arrays.asList()
+            );
+            String result = finalizedSignedTransaction.getId().toString();
+            log.info("Success! Response: " + result);
+            return result;
         }
         // Catch any exceptions, log them and rethrow the exception.
         catch (Exception e) {
